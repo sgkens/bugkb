@@ -1,0 +1,27 @@
+# Run:  docker compose up -d --build
+# The KB API has no authentication, so the port is published on loopback only. Do not change 127.0.0.1 to 0.0.0.0
+# unless the host is otherwise isolated.
+services:
+  bugkb:
+    build:
+      context: .
+      args:
+        PB_VERSION: "0.40.4"
+    image: bugkb:latest
+    container_name: bugkb
+    restart: unless-stopped
+    # Match the owner of the package-local __data directory.
+    user: "${BUGKB_UID:-1000}:${BUGKB_GID:-1000}"
+    ports:
+      - "127.0.0.1:${BUGKB_PORT:-8090}:8090"
+    environment:
+      TZ: ${TZ:-UTC}
+      # Optional: create the dashboard login on start (both required).
+      BUGKB_SUPERUSER_EMAIL: ${BUGKB_SUPERUSER_EMAIL:-}
+      BUGKB_SUPERUSER_PASSWORD: ${BUGKB_SUPERUSER_PASSWORD:-}
+    volumes:
+      - ./__data:/pb/pb_data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

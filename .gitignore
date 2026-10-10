@@ -1,0 +1,16 @@
+pb_data/
+__data/
+*_*/pb_data/
+*_*/pocketbase*
+!*_*/LICENSE.md
+!*_*/CHANGELOG.md
+bugkb.pid
+bugkb.log
+__pycache__/
+.env
+
+.env.*
+!.env.example
+*.tar
+*.tgz
+.venv/

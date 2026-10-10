@@ -1,0 +1,81 @@
+# Adapted from .gitlab-ci-tempale-from-another-repo.yml.
+# Shell runner prerequisites: Docker Engine, buildx, Python 3, git.
+# Publish credentials: masked/protected DOCKERHUB_USER and DOCKERHUB_API_KEY.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+
+stages: [build, test, deploy]
+
+variables:
+  PB_VERSION: "0.40.4"
+  DOCKERHUB_IMAGE: "sgkens/bugkb"
+  GIT_DEPTH: "0"
+
+default:
+  tags: [linux-shell]
+  interruptible: true
+
+build-image:
+  stage: build
+  script:
+    - docker buildx build --pull --platform linux/amd64 --build-arg "PB_VERSION=$PB_VERSION" --tag "bugkb-ci:$CI_COMMIT_SHA" --load .
+    - docker save --output bugkb-image.tar "bugkb-ci:$CI_COMMIT_SHA"
+  artifacts:
+    paths: [bugkb-image.tar]
+    expire_in: 1 day
+
+# Both jobs load the artifact explicitly: jobs need not share a Docker daemon.
+test-image:
+  stage: test
+  needs: [build-image]
+  script:
+    - docker load --input bugkb-image.tar
+    - sh scripts/test-image.sh "bugkb-ci:$CI_COMMIT_SHA"
+
+deploy-dockerhub:
+  stage: deploy
+  needs: [build-image, test-image]
+  interruptible: false
+  resource_group: dockerhub-production
+  environment:
+    name: production
+    url: https://hub.docker.com/r/$DOCKERHUB_IMAGE
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_PIPELINE_SOURCE != "merge_request_event"'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && $CI_COMMIT_REF_PROTECTED == "true"'
+  script:
+    - |
+      set -eu
+      : "${DOCKERHUB_USER:?Set DOCKERHUB_USER in GitLab CI variables}"
+      : "${DOCKERHUB_API_KEY:?Set a Docker Hub access token in GitLab CI variables}"
+      # Isolate credentials on the shared shell runner.
+      export DOCKER_CONFIG="$(mktemp -d)"
+      trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+      printf '%s' "$DOCKERHUB_API_KEY" | docker login --username "$DOCKERHUB_USER" --password-stdin
+      docker load --input bugkb-image.tar
+      git fetch origin main
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        git merge-base --is-ancestor "$CI_COMMIT_SHA" origin/main
+      fi
+      docker tag "bugkb-ci:$CI_COMMIT_SHA" "$DOCKERHUB_IMAGE:$CI_COMMIT_SHA"
+      docker push "$DOCKERHUB_IMAGE:$CI_COMMIT_SHA"
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        # A release tag must refer to a commit already merged into main.
+        release="${CI_COMMIT_TAG#v}"
+        docker tag "bugkb-ci:$CI_COMMIT_SHA" "$DOCKERHUB_IMAGE:$release"
+        docker push "$DOCKERHUB_IMAGE:$release"
+      else
+        # Skip stale pipelines rather than overwriting a newer latest image.
+        git fetch origin main
+        if [ "$(git rev-parse origin/main)" != "$CI_COMMIT_SHA" ]; then
+          echo "Main has advanced; leaving latest unchanged."
+          exit 0
+        fi
+        docker tag "bugkb-ci:$CI_COMMIT_SHA" "$DOCKERHUB_IMAGE:latest"
+        docker push "$DOCKERHUB_IMAGE:latest"
+      fi
